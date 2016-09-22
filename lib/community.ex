@@ -1,0 +1,2 @@
+defmodule Community do
+end
