@@ -27,6 +27,6 @@ defmodule Community.Mixfile do
   #
   # Type "mix help deps" for more examples and options
   defp deps do
-    []
+    [{:meck, github: "eproxus/meck", only: :test}]
   end
 end
