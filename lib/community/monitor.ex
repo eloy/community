@@ -7,7 +7,6 @@ defmodule Community.Monitor do
       @server_name __MODULE__
 
       def start_link() do
-        IO.puts "start_link server: #{@server_name}"
         GenServer.start_link(__MODULE__, :opt, name: @server_name)
       end
 
@@ -29,44 +28,48 @@ defmodule Community.Monitor do
       # def start_service(service_id)
 
       def handle_call({:monitor, service_id, process, data, monitor_pid,}, _from, {services, refs}) do
-        refs = monitor_service(service_id, process, refs)
-        refs = monitor_subscriptor(service_id, process, monitor_pid, refs)
-        services = add_subscriptor(service_id, process, data, monitor_pid, services)
-
+        {services, refs} = monitor_service(service_id, process, {services, refs})
+        {services, refs} = add_subscriptor(service_id, data, monitor_pid, {services, refs})
         {:reply, :ok, {services, refs}}
       end
 
-      defp add_subscriptor(service_id, process, data, monitor_pid, services) do
-        service = Map.get services, service_id, %{}
-        subscriptors = Map.get(service, process, %{}) |> Map.put(monitor_pid, data)
-        service = Map.put service, process, subscriptors
-        Map.put services, service_id, service
+      defp add_subscriptor(service_id, data, monitor_pid, {services, refs}) do
+        {process, ref, subscriptors} = Map.fetch! services, service_id
+        subscriptors = Map.put(subscriptors, monitor_pid, data)
+        services = Map.put services, service_id, {process, ref, subscriptors}
+        refs = monitor_subscriptor(service_id, monitor_pid, refs)
+        {services, refs}
       end
 
-      defp pop_subscriptor(service_id, process, subscriptor, services) do
-        service = Map.fetch! services, service_id
-        subscriptors = Map.fetch! service, process
-
-        {data, subscriptors} = Map.pop subscriptors, subscriptor
-        service = Map.put service, process, subscriptors
-        services = Map.put services, service_id, service
+      defp pop_subscriptor(service_id, subscriptor, services) do
+        {process, ref, subscriptors} = Map.fetch! services, service_id
+        {data, subscriptors} = Map.pop(subscriptors, subscriptor)
+        services = Map.put services, service_id, {process, ref, subscriptors}
         {data, services}
       end
 
-
-      defp monitor_service(service_id, process, refs) do
-        case Map.fetch refs, process do
-          {:ok, ref} -> refs
+      defp monitor_service(service_id, process, {services,refs}) do
+        case Map.fetch services, service_id do
+          {:ok, {process, ref, subscriptors}} -> {services, refs}
           :error ->
             ref = Process.monitor process
-            Map.put refs, ref, {:service, service_id, process}
+            refs = Map.put refs, ref, {:service, service_id}
+            services = Map.put services, service_id, {process, ref, %{}}
+            {services, refs}
         end
       end
 
-
-      def monitor_subscriptor(service_id, process, subscriptor, refs) do
+      def monitor_subscriptor(service_id, subscriptor, refs) do
         ref = Process.monitor subscriptor
-        Map.put refs, ref, {:subscriptor, service_id, process, subscriptor}
+        Map.put refs, ref, {:subscriptor, service_id, subscriptor}
+      end
+
+      def replace_service(service_id, process, {services, refs}) do
+        ref = Process.monitor process
+        refs = Map.put refs, ref, {:service, service_id}
+        {_process, _ref, subscriptors} = Map.fetch! services, service_id
+        services = Map.put services, service_id, {process, ref, subscriptors}
+        {services, refs}
       end
 
       defp ping_all do
@@ -86,49 +89,64 @@ defmodule Community.Monitor do
       end
 
       defp handle_down(ref, {services, refs}) do
-
-        case Map.fetch refs, ref do
-          {:ok, {:service, service_id, process}} -> service_down(service_id, process, {services, refs})
-          {:ok, {:subscriptor, service_id, process, subscriptor}} -> subscriptor_down(service_id, process, subscriptor, {services, refs})
-          :error -> {services, refs}
+        {data, refs} = Map.pop refs, ref
+        case data do
+          {:service, service_id} -> service_down(service_id, {services, refs})
+          {:subscriptor, service_id, subscriptor} -> subscriptor_down(service_id, subscriptor, {services, refs})
         end
       end
 
+      # Notifications
+      #----------------------------------------------------------------------
 
-      defp service_down(service_id, process, {services, refs}) do
-        service = Map.fetch! services, service_id
-        subscriptors = Map.fetch! service, process
+      defp service_down(service_id, {services, refs}) do
+        {process, ref, subscriptors} = Map.fetch! services, service_id
         Enum.map subscriptors, fn({subscriptor, data}) ->
           send subscriptor, {:community_service_down, service_id, data}
         end
 
         handle_community({:community_service_down, service_id})
-        eval_restart_service(service_id)
-        {services, refs}
+        eval_restart_service(service_id, {services, refs})
       end
 
-      defp subscriptor_down(service_id, process, subscriptor, {services, refs}) do
-        {data, services} = pop_subscriptor(service_id, process, subscriptor, services)
+      defp subscriptor_down(service_id, subscriptor, {services, refs}) do
+        {process, _ref, _subscriptors} = Map.fetch! services, service_id
+        {data, services} = pop_subscriptor(service_id, subscriptor, services)
         send process, {:community_subscriptor_down, service_id, data}
         handle_community({:community_subscriptor_down, service_id, data})
         {services, refs}
+      end
+
+      def service_replaced(service_id, new_process, {services, _refs}) do
+        {_process, _ref, subscriptors} = Map.fetch! services, service_id
+        Enum.map subscriptors, fn({subscriptor, data}) ->
+          send subscriptor, {:community_service_replaced, service_id, new_process}
+        end
+        :ok
       end
 
       # Service restart
       #----------------------------------------------------------------------
 
 
-      def handle_info({:restart_service, service_id}, {service, refs})do
-        eval_restart_service(service_id)
-        {:noreply, {service, refs}}
+      def handle_info({:restart_service, service_id}, state)do
+        state = eval_restart_service(service_id, state)
+        {:noreply, state}
       end
 
-      def eval_restart_service(service_id) do
+      def eval_restart_service(service_id, state) do
         case start_service(service_id) do
-          {:ok, new_pid} -> :ok
-          :retry -> Process.send_after self(), {:restart_service, service_id}, 5000
-          {:retry, timeout} -> Process.send_after self(), {:restart_service, service_id}, timeout
-          _ -> :ok
+          {:ok, pid} ->
+            state = replace_service(service_id, pid, state)
+            :ok = service_replaced(service_id, pid, state)
+            state
+          :retry ->
+            Process.send_after self(), {:restart_service, service_id}, 5000
+            state
+          {:retry, timeout} ->
+            Process.send_after self(), {:restart_service, service_id}, timeout
+            state
+          _ -> state
         end
       end
     end
