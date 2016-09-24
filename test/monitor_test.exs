@@ -8,6 +8,14 @@ defmodule MonitorTest do
     def nodes_list do
       []
     end
+
+    def handle_community(msg) do
+      :ok
+    end
+
+    def start_service(msg) do
+      :ok
+    end
   end
 
   defmodule TestService do
@@ -25,13 +33,13 @@ defmodule MonitorTest do
   defmodule TestSubscriptor do
     use GenServer
 
-    def start_link(service_pid) do
-      GenServer.start_link(__MODULE__, service_pid)
+    def start_link(service_pid, service_id, data \\ {}) do
+      GenServer.start_link(__MODULE__, {service_pid, service_id, data})
     end
 
-    def init(service_pid) do
-      TestMonitor.monitor :test_service, service_pid, {:foo}
-      {:ok, {service_pid}}
+    def init({service_pid, service_id, data}) do
+      TestMonitor.monitor service_id, service_pid, data
+      {:ok, {service_pid, service_id, data}}
     end
   end
 
@@ -39,18 +47,20 @@ defmodule MonitorTest do
     test "monitor services" do
       {:ok, pid} = TestMonitor.start_link
       {:ok, service} = TestService.start_link
-      service_name = :test_service
+      service_id = {:test_service, 1}
       data = {:foo, :bar}
-      TestMonitor.monitor service_name, service, data
+      TestMonitor.monitor service_id, service, data
       GenServer.stop service
-      assert_receive {:community_service_down, service_name, data}
+      assert_receive {:community_service_down, service_id, data}
     end
 
     test "monitor nodes" do
+      service_id = {:test_service, 1}
+      data = {:foo, :bar}
       {:ok, pid} = TestMonitor.start_link
-      {:ok, subscriptor} = TestSubscriptor.start_link(self())
+      {:ok, subscriptor} = TestSubscriptor.start_link(self(), service_id, data)
       GenServer.stop subscriptor
-      assert_receive {:community_subscriptor_down, :test_service, {:foo}}
+      assert_receive {:community_subscriptor_down, service_id, data}
     end
   end
 
