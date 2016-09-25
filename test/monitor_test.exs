@@ -4,17 +4,14 @@ defmodule MonitorTest do
 
 
   defmodule TestMonitor do
-    use Community.Monitor, otp_app: :community
-    def nodes_list do
-      []
+    use Community.Monitor
+
+    def handle_community(msg, pid) do
+      send pid, {:handle_community, msg}
     end
 
-    def handle_community(msg) do
-      :ok
-    end
-
-    def start_service(msg) do
-      :ok
+    def start_service(service_id, pid) do
+      send pid, {:start_service, service_id}
     end
   end
 
@@ -38,29 +35,32 @@ defmodule MonitorTest do
     end
 
     def init({service_pid, service_id, data}) do
-      TestMonitor.monitor service_id, service_pid, data
+      Community.monitor service_id, service_pid, data
       {:ok, {service_pid, service_id, data}}
     end
   end
 
-  describe "monotoring servives" do
+  describe "monitoring servives" do
     test "monitor services" do
-      {:ok, pid} = TestMonitor.start_link
+      {:ok, _pid} = TestMonitor.start_link self()
       {:ok, service} = TestService.start_link
       service_id = {:test_service, 1}
       data = {:foo, :bar}
-      TestMonitor.monitor service_id, service, data
+      Community.monitor service_id, service, data
       GenServer.stop service
-      assert_receive {:community_service_down, service_id, data}
+      assert_receive {:community_service_down, ^service_id, ^data}
+      assert_receive {:handle_community, {:community_service_down, ^service_id}}
+      assert_receive {:start_service, ^service_id}
     end
 
     test "monitor nodes" do
       service_id = {:test_service, 1}
       data = {:foo, :bar}
-      {:ok, pid} = TestMonitor.start_link
+      {:ok, _pid} = TestMonitor.start_link self()
       {:ok, subscriptor} = TestSubscriptor.start_link(self(), service_id, data)
       GenServer.stop subscriptor
-      assert_receive {:community_subscriptor_down, service_id, data}
+      assert_receive {:community_subscriptor_down, ^service_id, ^data}
+      assert_receive {:handle_community, {:community_subscriptor_down, ^service_id, ^data}}
     end
   end
 
