@@ -22,4 +22,9 @@ defmodule Community do
     GenServer.call @monitor_name, {:monitor, service_id, process, data, monitor_pid}
   end
 
+
+  def demonitor(service_id, ref) do
+    GenServer.call @monitor_name, {:demonitor, service_id, ref}
+  end
+
 end
